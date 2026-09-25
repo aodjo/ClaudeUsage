@@ -15,25 +15,6 @@ let last = null; /** Last successful usage response and the time it was fetched.
 let saveTimer; /** Handle of the pending debounced window-position save. */
 
 /**
- * OAuth credentials that Claude Code stores at login.
- *
- * @typedef {Object} OAuthCredentials
- * @property {string} accessToken - Bearer token for Anthropic APIs.
- * @property {string} refreshToken - Token Claude Code uses to renew the access token.
- * @property {number} expiresAt - Access token expiry as a Unix timestamp in milliseconds.
- */
-
-/**
- * Outcome of a single usage request.
- *
- * @typedef {Object} FetchResult
- * @property {Object} [data] - Parsed usage response on success.
- * @property {string} [error] - Human-readable (Korean) error message on failure.
- * @property {number} [retryAfter] - Seconds to wait before retrying, taken from a 429 response.
- * @property {boolean} [signedOut] - True when there is no usable login, so earlier data must not be shown.
- */
-
-/**
  * Reads Claude Code's credentials JSON from the macOS keychain.
  *
  * Shells out to the `security` CLI and looks up the generic password stored under the
@@ -83,10 +64,12 @@ function readCredentialsFile() {
  * On macOS the keychain is tried first and the credentials file is the fallback; on other
  * platforms only the file is read. The store is re-read on every call, so tokens that
  * Claude Code refreshes are picked up without restarting the widget. Malformed JSON is
- * treated the same as missing credentials.
+ * treated the same as missing credentials. The entry holds `accessToken`, `refreshToken`
+ * and `expiresAt` (Unix time in milliseconds).
  *
  * @async
- * @returns {Promise<?OAuthCredentials>} The `claudeAiOauth` entry, or null if none is available.
+ * @returns {Promise<?{accessToken: string, refreshToken: string, expiresAt: number}>} The
+ *   `claudeAiOauth` entry, or null if none is available.
  *
  * @example
  * const creds = await readCredentials();
@@ -109,8 +92,13 @@ async function readCredentials() {
  * here: refreshing rotates the refresh token and would sign Claude Code out, so an expired
  * token is reported and the widget waits for Claude Code to renew it.
  *
+ * On failure, `error` is a Korean message for the widget, `retryAfter` carries the seconds
+ * from a 429 response's Retry-After header, and `signedOut` is true when there is no usable
+ * login, so earlier numbers must not be shown.
+ *
  * @async
- * @returns {Promise<FetchResult>} The parsed usage data, or an error message.
+ * @returns {Promise<{data?: Object, error?: string, retryAfter?: number, signedOut?: boolean}>}
+ *   The parsed usage response as `data`, or the failure details.
  * @throws {Error} If the request fails at the network level, times out after 15 seconds,
  *   or the response body is not valid JSON.
  *

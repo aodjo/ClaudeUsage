@@ -10,16 +10,6 @@ const refreshBtn = document.getElementById('refresh'); /** Header button that tr
 let latest = null; /** Most recent payload from the main process, re-rendered on every tick. */
 
 /**
- * One usage limit, ready for display.
- *
- * @typedef {Object} Row
- * @property {string} label - Display name, e.g. "주간 · Fable".
- * @property {number} percent - Utilization from 0 to 100.
- * @property {?string} resetsAt - ISO 8601 time when the limit resets, or null.
- * @property {string} [severity] - Severity reported by the API, e.g. "normal" or "critical".
- */
-
-/**
  * Builds the display name for an entry of the API's `limits[]` array.
  *
  * The group ("session", "weekly") gives the base label. When the limit is scoped to a
@@ -45,10 +35,13 @@ function limitLabel(limit) {
  *
  * Uses the `limits[]` array when present, because it lists every active limit, including
  * model-scoped ones. Responses without it fall back to the `five_hour`, `seven_day`,
- * `seven_day_opus` and `seven_day_sonnet` fields, skipping any that are null.
+ * `seven_day_opus` and `seven_day_sonnet` fields, skipping any that are null. Each row
+ * has a display `label`, a `percent` from 0 to 100, the ISO 8601 `resetsAt` time (or null)
+ * and, when the API provides it, a `severity` such as "normal" or "critical".
  *
  * @param {Object} data - Parsed body of the usage endpoint.
- * @returns {Row[]} Rows in the order the API lists them.
+ * @returns {Array<{label: string, percent: number, resetsAt: ?string, severity?: string}>}
+ *   Rows in the order the API lists them.
  *
  * @example
  * toRows(data)[0]; // { label: '5시간', percent: 8, resetsAt: '2026-09-25T12:49:59Z', severity: 'normal' }
@@ -78,7 +71,7 @@ function toRows(data) {
  * A "critical" severity from the API or 90% and above is "crit". 75% and above is "warn".
  * Anything lower is "ok". The result is used as a CSS class that colors the bar.
  *
- * @param {Row} row - The row to classify.
+ * @param {{percent: number, severity?: string}} row - A row from `toRows`.
  * @returns {'ok'|'warn'|'crit'} The alert level.
  *
  * @example
@@ -139,7 +132,8 @@ function el(tag, className, text) {
  * The row shows the label, the time left until reset, and the rounded percentage above a
  * progress bar clamped to 0–100%. Hovering the countdown shows the exact local reset time.
  *
- * @param {Row} row - The limit to render.
+ * @param {{label: string, percent: number, resetsAt: ?string, severity?: string}} row - A row
+ *   from `toRows`.
  * @returns {HTMLElement} The row element.
  *
  * @example

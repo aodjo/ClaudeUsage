@@ -1,6 +1,6 @@
 {
   "name": "claude-usage-widget",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Claude 요금제 사용량을 화면에 띄워 두는 위젯",
   "author": "aodjo",

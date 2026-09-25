@@ -1,139 +1,158 @@
-const { app, BrowserWindow, ipcMain, Menu, powerMonitor, screen } = require('electron');
-const { execFile } = require('node:child_process');
+const { app, BrowserWindow, ipcMain, Menu, powerMonitor, screen, session } = require('electron');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
-const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'; /** Claude OAuth endpoint that reports plan usage limits. */
 const POLL_MS = 2 * 60 * 1000; /** Interval between automatic usage fetches, in milliseconds. */
 const WIDTH = 260; /** Fixed content width of the widget window, in pixels. */
+const WEB_ORIGIN = 'https://claude.ai'; /** claude.ai origin the widget logs in to and reads usage from. */
+const WEB_PARTITION = 'persist:claude'; /** Persistent session partition that holds the widget's claude.ai login. */
+const LOGIN_EXPIRED = 'claude.ai 로그인이 만료됐습니다. 다시 로그인하세요.'; /** Message shown when claude.ai rejects the stored login. */
 
 let win; /** The floating widget window. */
+let loginWin = null; /** The claude.ai login window while it is open. */
 let timer; /** Handle of the next scheduled poll. */
 let inFlight = false; /** Whether a usage request is currently in progress. */
+let pollAgain = false; /** Whether another fetch was requested while one was in progress. */
 let last = null; /** Last successful usage response and the time it was fetched. */
 let saveTimer; /** Handle of the pending debounced window-position save. */
 
 /**
- * Reads Claude Code's credentials JSON from the macOS keychain.
+ * Turns a failed usage response into the error details shown by the widget.
  *
- * Shells out to the `security` CLI and looks up the generic password stored under the
- * "Claude Code-credentials" service. Any failure (item missing, access denied, non-macOS
- * host) resolves to null instead of rejecting.
+ * 401 and 403 mean the login is no longer valid, so the result is marked as signed out.
+ * 429 carries the Retry-After delay so the next poll can back off. Any other status is
+ * reported by its code.
  *
- * @async
- * @returns {Promise<?string>} The raw credentials JSON, or null if it could not be read.
+ * @param {Response} res - The non-OK response.
+ * @returns {{error: string, retryAfter?: number, signedOut?: boolean}} The failure details.
  *
  * @example
- * const raw = await readKeychain();
- * console.log(raw?.startsWith('{"claudeAiOauth"')); // true
+ * responseError(new Response(null, { status: 401 }));
+ * // { error: 'claude.ai 로그인이 만료됐습니다. 다시 로그인하세요.', signedOut: true }
  */
-function readKeychain() {
-  return new Promise((resolve) => {
-    execFile('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], (err, stdout) => {
-      resolve(err ? null : stdout.trim());
-    });
+function responseError(res) {
+  if (res.status === 401 || res.status === 403) return { error: LOGIN_EXPIRED, signedOut: true };
+  if (res.status === 429) {
+    return { error: '요청 제한(429). 잠시 후 다시 시도합니다.', retryAfter: Number(res.headers.get('retry-after')) || 0 };
+  }
+  return { error: `HTTP ${res.status}` };
+}
+
+/**
+ * Returns the Electron session that holds the widget's own claude.ai login.
+ *
+ * The session is persisted under WEB_PARTITION, so the login survives restarts and is
+ * kept apart from the widget window's default session.
+ *
+ * @returns {Electron.Session} The claude.ai session.
+ *
+ * @example
+ * const cookies = await webSession().cookies.get({ url: WEB_ORIGIN });
+ */
+function webSession() {
+  return session.fromPartition(WEB_PARTITION);
+}
+
+/**
+ * Sends a GET request to claude.ai with the widget's claude.ai login.
+ *
+ * The request goes through Chromium's network stack with the session's cookies, so it
+ * looks like the claude.ai web app calling its own API.
+ *
+ * @async
+ * @param {string} pathname - Path on claude.ai, starting with a slash.
+ * @returns {Promise<Response>} The response.
+ * @throws {Error} If the request fails at the network level or times out after 15 seconds.
+ *
+ * @example
+ * const res = await webFetch('/api/organizations');
+ * console.log(res.status); // 200
+ */
+function webFetch(pathname) {
+  return webSession().fetch(`${WEB_ORIGIN}${pathname}`, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(15_000),
   });
 }
 
 /**
- * Reads Claude Code's credentials JSON from disk.
+ * Tells whether the widget is logged in to claude.ai.
  *
- * Windows and Linux keep credentials in `.credentials.json` inside the Claude config
- * directory, which is `CLAUDE_CONFIG_DIR` when set and `~/.claude` otherwise. A missing
- * or unreadable file yields null.
- *
- * @returns {?string} The raw credentials JSON, or null if the file could not be read.
- *
- * @example
- * const raw = readCredentialsFile();
- * console.log(raw === null); // true if Claude Code has never logged in on this machine
- */
-function readCredentialsFile() {
-  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  try {
-    return fs.readFileSync(path.join(dir, '.credentials.json'), 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Loads the OAuth credentials that Claude Code saved at login.
- *
- * On macOS the keychain is tried first and the credentials file is the fallback; on other
- * platforms only the file is read. The store is re-read on every call, so tokens that
- * Claude Code refreshes are picked up without restarting the widget. Malformed JSON is
- * treated the same as missing credentials. The entry holds `accessToken`, `refreshToken`
- * and `expiresAt` (Unix time in milliseconds).
+ * Checks for the `sessionKey` cookie that claude.ai sets at login. The cookie existing
+ * does not guarantee the server still accepts it; an expired login shows up as a 401 or
+ * 403 on the next request.
  *
  * @async
- * @returns {Promise<?{accessToken: string, refreshToken: string, expiresAt: number}>} The
- *   `claudeAiOauth` entry, or null if none is available.
+ * @returns {Promise<boolean>} True when a claude.ai session cookie is stored.
  *
  * @example
- * const creds = await readCredentials();
- * console.log(typeof creds?.accessToken); // 'string'
+ * if (await hasWebLogin()) console.log('claude.ai login found');
  */
-async function readCredentials() {
-  const raw = (process.platform === 'darwin' && (await readKeychain())) || readCredentialsFile();
-  try {
-    return raw ? JSON.parse(raw).claudeAiOauth ?? null : null;
-  } catch {
-    return null;
-  }
+async function hasWebLogin() {
+  const cookies = await webSession().cookies.get({ url: WEB_ORIGIN, name: 'sessionKey' });
+  return cookies.length > 0;
 }
 
 /**
- * Requests the current plan usage from the Claude OAuth usage endpoint.
+ * Finds the claude.ai organization whose usage should be shown.
  *
- * Expected failures (no credentials, expired token, 401, 429 and other HTTP errors) are
- * returned as an `error` message rather than thrown. The access token is never refreshed
- * here: refreshing rotates the refresh token and would sign Claude Code out, so an expired
- * token is reported and the widget waits for Claude Code to renew it.
+ * Uses the `lastActiveOrg` cookie, which claude.ai sets to the organization the user last
+ * had open. Without it, lists the account's organizations and picks the first one that
+ * can chat, falling back to the first one.
  *
- * On failure, `error` is a Korean message for the widget, `retryAfter` carries the seconds
- * from a 429 response's Retry-After header, and `signedOut` is true when there is no usable
- * login, so earlier numbers must not be shown.
+ * @async
+ * @returns {Promise<?string>} The organization UUID, or null if it could not be determined.
+ * @throws {Error} If the organization list request fails at the network level.
+ *
+ * @example
+ * const orgId = await webOrganizationId();
+ * console.log(orgId); // '1671290f-6105-491c-bdd5-5bafdf071264'
+ */
+async function webOrganizationId() {
+  const [cookie] = await webSession().cookies.get({ url: WEB_ORIGIN, name: 'lastActiveOrg' });
+  if (cookie?.value) return cookie.value;
+
+  const res = await webFetch('/api/organizations');
+  if (!res.ok) return null;
+  const orgs = await res.json();
+  const org = orgs.find((o) => o.capabilities?.includes('chat')) ?? orgs[0];
+  return org?.uuid ?? null;
+}
+
+/**
+ * Requests the current plan usage with the widget's claude.ai login.
+ *
+ * Calls the same usage API the claude.ai settings page uses, for the organization picked
+ * by webOrganizationId. Expected failures are returned as an `error` message rather than
+ * thrown. Having no login, or a login claude.ai rejects, is marked as signed out so the
+ * widget drops old numbers and shows its login button.
  *
  * @async
  * @returns {Promise<{data?: Object, error?: string, retryAfter?: number, signedOut?: boolean}>}
  *   The parsed usage response as `data`, or the failure details.
- * @throws {Error} If the request fails at the network level, times out after 15 seconds,
- *   or the response body is not valid JSON.
+ * @throws {Error} If a request fails at the network level, times out after 15 seconds, or
+ *   the response body is not valid JSON.
  *
  * @example
  * const { data, error } = await fetchUsage();
- * console.log(error ?? data.five_hour.utilization); // 8
+ * console.log(error ?? data.five_hour.utilization); // 9
  */
 async function fetchUsage() {
-  const creds = await readCredentials();
-  if (!creds?.accessToken) {
-    return { error: 'Claude Code 로그인 정보가 없습니다. claude에서 /login 하세요.', signedOut: true };
-  }
-  if (creds.expiresAt && creds.expiresAt < Date.now()) {
-    return { error: '토큰이 만료됐습니다. Claude Code를 실행하면 갱신됩니다.' };
-  }
+  if (!(await hasWebLogin())) return { error: 'claude.ai에 로그인하세요.', signedOut: true };
 
-  const res = await fetch(USAGE_URL, {
-    headers: {
-      Authorization: `Bearer ${creds.accessToken}`,
-      'anthropic-beta': 'oauth-2025-04-20',
-    },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (res.status === 401) return { error: '인증 실패(401). Claude Code에서 다시 로그인하세요.', signedOut: true };
-  if (res.status === 429) {
-    return { error: '요청 제한(429). 잠시 후 다시 시도합니다.', retryAfter: Number(res.headers.get('retry-after')) || 0 };
-  }
-  if (!res.ok) return { error: `HTTP ${res.status}` };
+  const orgId = await webOrganizationId();
+  if (!orgId) return { error: LOGIN_EXPIRED, signedOut: true };
+
+  const res = await webFetch(`/api/organizations/${orgId}/usage`);
+  if (!res.ok) return responseError(res);
   return { data: await res.json() };
 }
 
 /**
  * Fetches usage, sends the result to the renderer, and schedules the next fetch.
  *
- * Calls made while a request is already in flight are ignored. A failed fetch keeps the
+ * A call made while a request is in flight is not dropped: one more fetch runs as soon as
+ * the current one finishes, so a login or logout is always reflected. A failed fetch keeps the
  * last successful data and sends it together with the error, so the widget keeps showing
  * the previous numbers. The exception is a signed-out failure: the old numbers are dropped,
  * because the next login may be a different account. The next run is scheduled after
@@ -143,10 +162,13 @@ async function fetchUsage() {
  * @returns {Promise<void>} Resolves once the result is sent and the next poll is scheduled.
  *
  * @example
- * await poll(); // the renderer receives { data, fetchedAt, error } on the 'usage' channel
+ * await poll(); // the renderer receives { data, fetchedAt, error, signedOut } on the 'usage' channel
  */
 async function poll() {
-  if (inFlight) return;
+  if (inFlight) {
+    pollAgain = true;
+    return;
+  }
   inFlight = true;
   clearTimeout(timer);
 
@@ -160,7 +182,14 @@ async function poll() {
 
   if (result.data) last = { data: result.data, fetchedAt: Date.now() };
   else if (result.signedOut) last = null;
-  if (win && !win.isDestroyed()) win.webContents.send('usage', { ...last, error: result.error ?? null });
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('usage', { ...last, error: result.error ?? null, signedOut: Boolean(result.signedOut) });
+  }
+  if (pollAgain) {
+    pollAgain = false;
+    poll();
+    return;
+  }
   timer = setTimeout(poll, Math.max(POLL_MS, (result.retryAfter ?? 0) * 1000));
 }
 
@@ -223,17 +252,117 @@ function savePosition() {
 }
 
 /**
- * Opens the widget's context menu.
+ * Returns the user agent of a regular Chrome browser.
  *
- * Offers an immediate refresh, an always-on-top toggle, and Quit. Quit is the only way to
- * exit, because the widget has no dock or taskbar entry.
+ * Electron's default user agent names the app and Electron, and some sign-in providers,
+ * notably Google, refuse to sign in from embedded browsers they recognise that way.
+ * Removing those two tokens leaves the plain Chrome user agent of the bundled Chromium.
+ *
+ * @returns {string} The user agent without the app and Electron tokens.
+ *
+ * @example
+ * browserUserAgent(); // 'Mozilla/5.0 (Macintosh; ...) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/... Safari/537.36'
+ */
+function browserUserAgent() {
+  return webSession()
+    .getUserAgent()
+    .split(' ')
+    .filter((token) => !token.startsWith('Electron/') && !token.startsWith(`${app.getName()}/`))
+    .join(' ');
+}
+
+/**
+ * Opens a window for logging in to claude.ai.
+ *
+ * The window uses the widget's claude.ai session, so the login is stored there and not in
+ * any browser. If the window is already open it is brought to the front instead. It closes
+ * itself once the login completes; see onWebCookieChanged.
  *
  * @returns {void}
  *
  * @example
+ * ipcMain.on('login', openLoginWindow);
+ */
+function openLoginWindow() {
+  if (loginWin) {
+    loginWin.focus();
+    return;
+  }
+  loginWin = new BrowserWindow({
+    width: 460,
+    height: 700,
+    title: 'claude.ai 로그인',
+    show: false,
+    webPreferences: { partition: WEB_PARTITION },
+  });
+  loginWin.loadURL(`${WEB_ORIGIN}/login`);
+  loginWin.once('ready-to-show', () => {
+    loginWin.show();
+    app.focus({ steal: true });
+  });
+  loginWin.on('closed', () => {
+    loginWin = null;
+  });
+}
+
+/**
+ * Finishes a claude.ai login once its session cookie appears.
+ *
+ * Only reacts while the login window is open, so routine cookie updates during normal use
+ * are ignored. When claude.ai sets `sessionKey`, the login window closes and usage is
+ * fetched right away with the new login.
+ *
+ * @param {Electron.Event} _event - The cookie event (unused).
+ * @param {Electron.Cookie} cookie - The cookie that changed.
+ * @param {string} _cause - Why the cookie changed (unused).
+ * @param {boolean} removed - Whether the cookie was removed.
+ * @returns {void}
+ *
+ * @example
+ * webSession().cookies.on('changed', onWebCookieChanged);
+ */
+function onWebCookieChanged(_event, cookie, _cause, removed) {
+  if (!loginWin || removed || cookie.name !== 'sessionKey') return;
+  loginWin.close();
+  poll();
+}
+
+/**
+ * Logs the widget out of claude.ai.
+ *
+ * Clears every cookie and all storage of the widget's claude.ai session and drops the
+ * numbers fetched with it. The widget then shows its login button again.
+ *
+ * @async
+ * @returns {Promise<void>} Resolves once the session is cleared and a new fetch has started.
+ *
+ * @example
+ * await logoutWeb();
+ */
+async function logoutWeb() {
+  await webSession().clearStorageData();
+  last = null;
+  poll();
+}
+
+/**
+ * Opens the widget's context menu.
+ *
+ * Offers an immediate refresh, an always-on-top toggle, logging in to or out of claude.ai
+ * depending on the current state, and Quit. Quit is the only way to exit, because the
+ * widget has no dock or taskbar entry.
+ *
+ * @async
+ * @returns {Promise<void>} Resolves once the menu has been shown.
+ *
+ * @example
  * ipcMain.on('menu', showMenu);
  */
-function showMenu() {
+async function showMenu() {
+  const account = (await hasWebLogin())
+    ? { label: 'claude.ai 로그아웃', click: logoutWeb }
+    : { label: 'claude.ai 로그인…', click: openLoginWindow };
+
   Menu.buildFromTemplate([
     { label: '지금 새로고침', click: poll },
     {
@@ -242,6 +371,8 @@ function showMenu() {
       checked: win.isAlwaysOnTop(),
       click: (item) => win.setAlwaysOnTop(item.checked, 'floating'),
     },
+    { type: 'separator' },
+    account,
     { type: 'separator' },
     { label: '종료', click: () => app.quit() },
   ]).popup({ window: win });
@@ -321,8 +452,8 @@ function createWindow() {
 /**
  * Starts the widget once Electron is ready.
  *
- * Hides the macOS dock icon, connects the renderer's IPC messages, refreshes when the
- * system wakes from sleep, and opens the window.
+ * Hides the macOS dock icon, prepares the claude.ai session, connects the renderer's IPC
+ * messages, refreshes when the system wakes from sleep, and opens the window.
  *
  * @returns {void}
  *
@@ -332,8 +463,12 @@ function createWindow() {
 function start() {
   if (process.platform === 'darwin') app.dock.hide();
 
+  webSession().setUserAgent(browserUserAgent());
+  webSession().cookies.on('changed', onWebCookieChanged);
+
   ipcMain.on('refresh', poll);
   ipcMain.on('menu', showMenu);
+  ipcMain.on('login', openLoginWindow);
   ipcMain.on('resize', fitToContent);
   powerMonitor.on('resume', poll);
 

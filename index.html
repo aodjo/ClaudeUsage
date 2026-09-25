@@ -67,6 +67,22 @@
     footer { margin-top: 8px; color: var(--muted); font-size: 10.5px; }
     #error { color: var(--crit); }
     #error:empty { display: none; }
+    #login {
+      -webkit-app-region: no-drag;
+      display: block;
+      width: 100%;
+      margin: 8px 0 2px;
+      padding: 6px 0;
+      border: 0;
+      border-radius: 7px;
+      background: var(--ok);
+      color: #fff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #login:hover { filter: brightness(1.08); }
+    #login[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -78,6 +94,7 @@
     <div id="rows"></div>
     <footer>
       <div id="error"></div>
+      <button id="login" hidden>claude.ai 로그인</button>
       <div id="updated">불러오는 중…</div>
     </footer>
   </div>

@@ -6,6 +6,7 @@ const rowsEl = document.getElementById('rows'); /** Container for the per-limit 
 const errorEl = document.getElementById('error'); /** Footer line showing the latest error. */
 const updatedEl = document.getElementById('updated'); /** Footer line showing when data was last fetched. */
 const refreshBtn = document.getElementById('refresh'); /** Header button that triggers an immediate refresh. */
+const loginBtn = document.getElementById('login'); /** Footer button that opens the claude.ai login, shown only when signed out. */
 
 let latest = null; /** Most recent payload from the main process, re-rendered on every tick. */
 
@@ -161,9 +162,10 @@ function renderRow(row) {
 /**
  * Redraws the widget from the latest payload.
  *
- * Replaces all rows, shows or clears the error line, and updates the "last updated" time.
- * When a fetch fails after an earlier success, the previous rows stay visible alongside
- * the error. Does nothing before the first payload arrives.
+ * Replaces all rows, shows or clears the error line, shows the login button only when no
+ * login is available, and updates the "last updated" time. When a fetch fails after an
+ * earlier success, the previous rows stay visible alongside the error. Does nothing before
+ * the first payload arrives.
  *
  * @returns {void}
  *
@@ -172,10 +174,11 @@ function renderRow(row) {
  */
 function render() {
   if (!latest) return;
-  const { data, fetchedAt, error } = latest;
+  const { data, fetchedAt, error, signedOut } = latest;
 
   rowsEl.replaceChildren(...(data ? toRows(data).map(renderRow) : []));
   errorEl.textContent = error ?? '';
+  loginBtn.hidden = !signedOut;
   updatedEl.textContent = fetchedAt
     ? `${new Date(fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 업데이트`
     : '';
@@ -186,7 +189,8 @@ function render() {
  *
  * Also stops the refresh button's spinning animation.
  *
- * @param {{data?: Object, fetchedAt?: number, error: ?string}} payload - Latest usage state.
+ * @param {{data?: Object, fetchedAt?: number, error: ?string, signedOut: boolean}} payload - Latest
+ *   usage state.
  * @returns {void}
  *
  * @example
@@ -244,6 +248,7 @@ function fitWindow() {
 
 window.usage.onUpdate(handleUpdate);
 refreshBtn.addEventListener('click', handleRefreshClick);
+loginBtn.addEventListener('click', () => window.usage.login());
 window.addEventListener('contextmenu', handleContextMenu);
 new ResizeObserver(fitWindow).observe(card);
 setInterval(render, TICK_MS);

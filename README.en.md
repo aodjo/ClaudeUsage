@@ -44,17 +44,29 @@ The app is not code-signed, so your system warns you the first time you open it.
 
 ## Usage
 
-The widget reads your usage with Claude Code's login. First run `claude` in a terminal and use `/login` to sign in with a claude.ai subscription account (Pro, Max, etc.).
-
 When launched, the widget appears in the top-right corner of the screen. It doesn't show up in the Dock or taskbar.
+
+### Logging in
+
+The first time, the widget shows a **claude.ai 로그인** (Log in to claude.ai) button. Sign in with a claude.ai subscription account (Pro, Max, etc.). Passkeys don't work in the login window, so sign in with your email.
+
+1. Click **claude.ai 로그인**.
+2. Enter your email in the login window and choose to continue with email.
+3. Open the login link from the email in your usual browser. It shows a verification code.
+4. Enter that code in the widget's login window. The window closes by itself and your usage appears.
+
+The login is stored only in the widget and stays after restarts.
+
+### Controls
 
 | To | Do this |
 |---|---|
 | Move it | Drag the widget. It opens in the same place next time. |
 | Refresh now | Click ↻ in the top-right corner. It also refreshes on its own every 2 minutes. |
 | Toggle always on top | Right-click → **항상 위에** (Always on top) |
+| Log out | Right-click → **claude.ai 로그아웃** (Log out of claude.ai) |
 | Quit | Right-click → **종료** (Quit) |
 
 - Bars turn amber at 75% and red at 90%.
 - Hover over the time left to see the exact reset time.
-- If it says the token has expired (토큰이 만료됐습니다), run Claude Code once. The widget shows your usage again as soon as the token is renewed.
+- If the login expires, the **claude.ai 로그인** button appears again.

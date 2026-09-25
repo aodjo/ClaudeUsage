@@ -1,0 +1,13 @@
+{
+  "name": "claude-usage-widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude 요금제 사용량을 화면에 띄워 두는 위젯",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^44.4.5"
+  }
+}
